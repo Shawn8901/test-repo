@@ -1,0 +1,74 @@
+name: Flake Updater
+
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  update_flake:
+    runs-on: ubuntu-22.04
+    outputs:
+      packages: ${{ steps.gen_packages.outputs.packages }}
+      machines: ${{ steps.gen_machines.outputs.machines }}
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+        with:
+          token: "${{ secrets.GH_TOKEN }}"
+          fetch-depth: 0
+      - name: Set up git
+        shell: bash
+        run: |
+          git config user.email git@pointjig.de
+          git config user.name "Git Bot"
+      - name: Install nix
+        uses: ./.github/actions/setup-env
+        with:
+          github_token: "${{ secrets.GH_TOKEN }}"
+          netrc_content: "${{ secrets.NETRC_CONTENT }}"
+      - name: Update flake
+        shell: bash
+        run: |
+          has_pr_open=$(gh pr list --label CI --json number)
+          if [ $has_pr_open != "[]" ]
+          then
+            echo "There is already a update PR, dont create a new one."
+
+            gh pr checkout $(gh pr list --label CI  --json number | jq ".[].number")
+            commits_ahead=$(git rev-list --count HEAD..origin/main)
+            echo "Commits ahead: $commits_ahead"
+            git log --oneline -5
+            echo "_---------"
+            git log --oneline -5 origin/main
+            if [ $commits_ahead -ne 0 ]
+            then
+              git fetch origin
+              git status
+              git rebase origin/main
+              git push --force-with-lease
+            fi
+
+            exit 0
+
+          fi
+
+          nix show-config
+          nix flake update
+          nix flake check --show-trace
+
+          git diff-index --quiet HEAD -- && echo "no changes" && exit 0
+
+          git switch -c update-flake_$(date -I)
+
+          git commit -am "flake.lock: Update $(date -I)"
+
+          git push -u origin update-flake_$(date -I)
+          PR=$(gh pr create \
+          --base main \
+          --body "Automatic package update for flake.lock on $(date -I)" \
+          --label bot --label CI \
+          --fill \
+          --title "Update for flake.lock $(date -I)")
+        env:
+          GH_TOKEN: ${{ github.token }}
